@@ -3,6 +3,8 @@
 pub mod connection;
 pub mod header;
 pub mod listener;
+pub mod recv_buffer;
+pub mod send_buffer;
 pub mod tcb;
 
 use std::collections::HashMap;

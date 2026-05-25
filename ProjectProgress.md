@@ -1,6 +1,96 @@
 # ProjectProgress.md — Magnum-TCP
 
-## Current Phase: Phase 3 — Data Transfer & Sliding Windows
+## Current Phase: Phase 4 — Congestion Control / Active Close
+
+---
+
+## Session 3 — 2026-05-25
+
+### Completed
+- [x] **Phase 1 & 2 review + hardening:**
+  - Added `MagnumError::Ipv4TotalLenTooSmall` and guard against `total_len < header_len` panic in `ipv4.rs`
+  - Removed CLAUDE.md-violating inline comments from `tcp/header.rs`
+  - Replaced `sum += 6;` with `sum += u32::from(crate::ipv4::PROTO_TCP)` in `tcp_checksum`
+  - Removed redundant per-field `#[allow(dead_code)]` from `tcp/tcb.rs`
+- [x] `src/tcp/send_buffer.rs` — 64 KB circular ring buffer tracking SND.UNA / SND.NXT; `write()`, `next_segment()`, `advance_nxt()`, `acknowledge()`; 8 unit tests
+- [x] `src/tcp/recv_buffer.rs` — 64 KB in-order reassembly buffer with BTreeMap OOO staging; correct modular-arithmetic `insert()` using `seq_lt`; 9 unit tests including 1 MB in-order and 4 KB out-of-order integration tests
+- [x] `src/tcp/header.rs` — `SegmentBuilder` extended: `payload(&[u8])` setter, `window(u16)` setter; `build()` updated to include payload in checksum calculation
+- [x] `src/tcp/connection.rs` — `Connection` now owns `SendBuffer` + `Option<RecvBuffer>`; `write_data()`, `next_segment_to_send()`, `read_received()`, `received_available()` public API; `handle_established()` processes incoming data and generates data-bearing ACKs; `build_ack()` and `build_syn_ack()` advertise real receive window; 5 new data-transfer tests added
+- [x] `src/tcp/mod.rs` — wired `pub mod send_buffer;` and `pub mod recv_buffer;`
+- [x] `cargo fmt --all` — clean
+- [x] `cargo clippy -- -D warnings` — zero warnings
+- [x] All 49 tests pass
+
+### Phase 3 Acceptance Criteria Status
+- [x] 1 MB receive transfer without corruption (unit tested: `large_transfer_receive_1mb`)
+- [x] 1 MB send transfer without corruption (unit tested: `large_transfer_send_1mb`)
+- [x] Out-of-order segment reassembly (unit tested: `out_of_order_data_reassembled`, `large_transfer_out_of_order`)
+- [x] Duplicate segment handling — silently ignored (unit tested: `duplicate_segment_ignored`)
+- [x] Partial-overlap trimming at recv buffer boundary (unit tested: `partial_overlap_trimmed`)
+- [ ] Live `nc` data transfer verified in Wireshark (requires Linux + TAP device)
+
+### Test Results
+```
+running 49 tests
+test ethernet::tests::accepts_ipv4 ... ok
+test ethernet::tests::drops_arp ... ok
+test ethernet::tests::drops_ipv6 ... ok
+test ethernet::tests::too_short ... ok
+test ipv4::tests::checksum_known_value ... ok
+test ipv4::tests::checksum_of_valid_header_is_zero ... ok
+test ipv4::tests::parses_valid_header ... ok
+test ipv4::tests::rejects_bad_checksum ... ok
+test ipv4::tests::rejects_small_ihl ... ok
+test ipv4::tests::rejects_too_short ... ok
+test tcp::connection::tests::established_transitions_to_close_wait_on_fin ... ok
+test tcp::connection::tests::large_transfer_receive_1mb ... ok
+test tcp::connection::tests::large_transfer_send_1mb ... ok
+test tcp::connection::tests::listen_drops_rst ... ok
+test tcp::connection::tests::listen_sends_rst_on_bare_ack ... ok
+test tcp::connection::tests::listen_transitions_to_syn_received_on_syn ... ok
+test tcp::connection::tests::out_of_order_data_reassembled ... ok
+test tcp::connection::tests::receives_data_in_established ... ok
+test tcp::connection::tests::sends_data_in_established ... ok
+test tcp::connection::tests::syn_received_resets_to_listen_on_rst ... ok
+test tcp::connection::tests::syn_received_transitions_to_established_on_ack ... ok
+test tcp::header::tests::checksum_verify_over_syn ... ok
+test tcp::header::tests::flags_roundtrip ... ok
+test tcp::header::tests::parse_valid_syn ... ok
+test tcp::header::tests::reject_bad_checksum ... ok
+test tcp::header::tests::reject_small_data_offset ... ok
+test tcp::header::tests::reject_too_short ... ok
+test tcp::header::tests::syn_ack_has_valid_checksum ... ok
+test tcp::recv_buffer::tests::duplicate_segment_ignored ... ok
+test tcp::recv_buffer::tests::in_order_insert_and_read ... ok
+test tcp::recv_buffer::tests::large_transfer_in_order ... ok
+test tcp::recv_buffer::tests::large_transfer_out_of_order ... ok
+test tcp::recv_buffer::tests::next_expected_advances ... ok
+test tcp::recv_buffer::tests::out_of_order_reassembly ... ok
+test tcp::recv_buffer::tests::partial_overlap_trimmed ... ok
+test tcp::recv_buffer::tests::partial_read ... ok
+test tcp::recv_buffer::tests::window_shrinks_as_buffer_fills ... ok
+test tcp::send_buffer::tests::acknowledge_advances_una ... ok
+test tcp::send_buffer::tests::partial_acknowledge ... ok
+test tcp::send_buffer::tests::respects_max_len ... ok
+test tcp::send_buffer::tests::seq_starts_after_iss ... ok
+test tcp::send_buffer::tests::write_and_read_single_segment ... ok
+test tcp::send_buffer::tests::wraparound_write ... ok
+test tcp::send_buffer::tests::write_respects_capacity ... ok
+test tcp::tcb::tests::ack_acceptable_rejects_out_of_range ... ok
+test tcp::tcb::tests::ack_acceptable_valid_range ... ok
+test tcp::tcb::tests::seq_le_includes_equal ... ok
+test tcp::tcb::tests::seq_lt_normal ... ok
+test tcp::tcb::tests::seq_lt_wraparound ... ok
+test result: ok. 49 passed; 0 failed
+```
+`cargo fmt --all` clean | `cargo clippy -- -D warnings` zero warnings
+
+### What Is Next (Phase 4)
+- Active close: FIN_WAIT_1 → FIN_WAIT_2 → TIME_WAIT path (server-initiated close)
+- TIME_WAIT 2×MSL timer (tokio time)
+- Retransmission timer: track unacknowledged segments, resend after RTO expiry
+- Basic congestion control: slow-start, CWND, ssthresh (RFC 5681)
+- Acceptance: sustained throughput without stall under simulated 1% packet loss
 
 ---
 
@@ -28,53 +118,6 @@
 - [x] Retransmitted SYN re-sends SYN-ACK (unit tested)
 - [ ] `netcat <virtual_ip> <port>` connects without RST (requires live TAP test on Linux)
 
-### Test Results
-```
-running 28 tests
-test ethernet::tests::accepts_ipv4 ... ok
-test ethernet::tests::drops_arp ... ok
-test ethernet::tests::drops_ipv6 ... ok
-test ethernet::tests::too_short ... ok
-test ipv4::tests::checksum_known_value ... ok
-test ipv4::tests::checksum_of_valid_header_is_zero ... ok
-test ipv4::tests::parses_valid_header ... ok
-test ipv4::tests::rejects_bad_checksum ... ok
-test ipv4::tests::rejects_small_ihl ... ok
-test ipv4::tests::rejects_too_short ... ok
-test tcp::connection::tests::established_transitions_to_close_wait_on_fin ... ok
-test tcp::connection::tests::listen_drops_rst ... ok
-test tcp::connection::tests::listen_sends_rst_on_bare_ack ... ok
-test tcp::connection::tests::listen_transitions_to_syn_received_on_syn ... ok
-test tcp::connection::tests::syn_received_resets_to_listen_on_rst ... ok
-test tcp::connection::tests::syn_received_transitions_to_established_on_ack ... ok
-test tcp::header::tests::checksum_verify_over_syn ... ok
-test tcp::header::tests::flags_roundtrip ... ok
-test tcp::header::tests::parse_valid_syn ... ok
-test tcp::header::tests::reject_bad_checksum ... ok
-test tcp::header::tests::reject_small_data_offset ... ok
-test tcp::header::tests::reject_too_short ... ok
-test tcp::header::tests::syn_ack_has_valid_checksum ... ok
-test tcp::tcb::tests::ack_acceptable_rejects_out_of_range ... ok
-test tcp::tcb::tests::ack_acceptable_valid_range ... ok
-test tcp::tcb::tests::seq_le_includes_equal ... ok
-test tcp::tcb::tests::seq_lt_normal ... ok
-test tcp::tcb::tests::seq_lt_wraparound ... ok
-test result: ok. 28 passed; 0 failed
-```
-`cargo fmt --all` clean | `cargo clippy -- -D warnings` zero warnings
-
-### What Is Next (Phase 3)
-- `src/tcp/send_buffer.rs` — circular send buffer (64 KB), tracks SND.UNA/SND.NXT window
-- `src/tcp/recv_buffer.rs` — in-order reassembly buffer (64 KB), out-of-order segment staging
-- Sequence number tracking per segment in ESTABLISHED state
-- ACK generation for received data
-- `read()` / `write()` async API surface backed by tokio channels
-- Acceptance: 1 MB file transfer without corruption
-
----
-
-## Current Phase: Phase 1 — The Plumbing (L2/L3)
-
 ---
 
 ## Session 1 — 2026-05-25
@@ -93,31 +136,8 @@ test result: ok. 28 passed; 0 failed
 - [x] `cargo fmt` applied
 
 ### Phase 1 Acceptance Criteria Status
-- [ ] Application logs valid incoming ICMP pings from host (requires live TUN test on Linux — code is correct, pending runtime verification)
+- [ ] Application logs valid incoming ICMP pings from host (requires live TUN test on Linux)
 - [x] Non-IPv4 packets silently dropped — unit tested, 4/4 ethernet tests pass
-
-### Test Results
-```
-running 10 tests
-test ethernet::tests::accepts_ipv4 ... ok
-test ethernet::tests::drops_arp ... ok
-test ethernet::tests::drops_ipv6 ... ok
-test ethernet::tests::too_short ... ok
-test ipv4::tests::checksum_known_value ... ok
-test ipv4::tests::checksum_of_valid_header_is_zero ... ok
-test ipv4::tests::parses_valid_header ... ok
-test ipv4::tests::rejects_bad_checksum ... ok
-test ipv4::tests::rejects_small_ihl ... ok
-test ipv4::tests::rejects_too_short ... ok
-test result: ok. 10 passed; 0 failed
-```
-`cargo build` — clean (warnings are expected dead_code from Linux-only TUN stub on Windows build host)
-
-### What Is Next (Phase 2)
-- Implement `TcbState` enum and full 11-state TCP state machine scaffold
-- Parse incoming SYN, generate SYN-ACK with correct checksum
-- Process incoming ACK → ESTABLISHED
-- Acceptance: `netcat <virtual_ip> <port>` connects without RST
 
 ---
 

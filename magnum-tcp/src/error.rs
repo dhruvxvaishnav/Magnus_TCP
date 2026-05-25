@@ -25,6 +25,11 @@ pub enum MagnumError {
     #[error("IPv4 total length exceeds buffer: total_len={total_len}, buf_len={buf_len}")]
     Ipv4TruncatedPacket { total_len: usize, buf_len: usize },
 
+    #[error(
+        "IPv4 total length smaller than header: total_len={total_len}, header_len={header_len}"
+    )]
+    Ipv4TotalLenTooSmall { total_len: usize, header_len: usize },
+
     #[error("TCP header too short: got {got} bytes, need {need}")]
     TcpHeaderTooShort { got: usize, need: usize },
 

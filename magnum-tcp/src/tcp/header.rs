@@ -118,7 +118,7 @@ pub fn tcp_checksum(tcp_segment: &[u8], src_ip: [u8; 4], dst_ip: [u8; 4]) -> u16
     sum += u16::from_be_bytes([src_ip[2], src_ip[3]]) as u32;
     sum += u16::from_be_bytes([dst_ip[0], dst_ip[1]]) as u32;
     sum += u16::from_be_bytes([dst_ip[2], dst_ip[3]]) as u32;
-    sum += 6; // PROTO_TCP
+    sum += u32::from(crate::ipv4::PROTO_TCP);
     sum += tcp_len;
 
     let mut i = 0;
@@ -146,6 +146,7 @@ pub struct SegmentBuilder {
     ack_num: u32,
     flags: TcpFlags,
     window: u16,
+    payload: Vec<u8>,
 }
 
 impl SegmentBuilder {
@@ -159,6 +160,7 @@ impl SegmentBuilder {
             ack_num: 0,
             flags: TcpFlags::default(),
             window: RECV_WINDOW,
+            payload: Vec::new(),
         }
     }
 
@@ -177,17 +179,28 @@ impl SegmentBuilder {
         self
     }
 
+    pub fn window(mut self, window: u16) -> Self {
+        self.window = window;
+        self
+    }
+
+    pub fn payload(mut self, data: &[u8]) -> Self {
+        self.payload = data.to_vec();
+        self
+    }
+
     pub fn build(self) -> Vec<u8> {
-        let mut buf = vec![0u8; TCP_MIN_HEADER_LEN];
+        let total = TCP_MIN_HEADER_LEN + self.payload.len();
+        let mut buf = vec![0u8; total];
 
         buf[0..2].copy_from_slice(&self.src_port.to_be_bytes());
         buf[2..4].copy_from_slice(&self.dst_port.to_be_bytes());
         buf[4..8].copy_from_slice(&self.seq.to_be_bytes());
         buf[8..12].copy_from_slice(&self.ack_num.to_be_bytes());
-        buf[12] = 0x50; // data offset = 5 (20 bytes), reserved bits = 0
+        buf[12] = 0x50;
         buf[13] = self.flags.to_byte();
         buf[14..16].copy_from_slice(&self.window.to_be_bytes());
-        // [16..18] stays 0 for checksum computation, [18..20] urgent ptr = 0
+        buf[TCP_MIN_HEADER_LEN..].copy_from_slice(&self.payload);
 
         let csum = tcp_checksum(&buf, self.src_ip, self.dst_ip);
         buf[16..18].copy_from_slice(&csum.to_be_bytes());

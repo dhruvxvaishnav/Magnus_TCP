@@ -4,7 +4,6 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TcbState {
     Listen,
@@ -24,7 +23,6 @@ pub enum TcbState {
 pub struct SendSequence {
     pub una: u32,
     pub nxt: u32,
-    #[allow(dead_code)]
     pub wnd: u16,
     pub iss: u32,
 }
@@ -32,7 +30,6 @@ pub struct SendSequence {
 #[derive(Debug)]
 pub struct RecvSequence {
     pub nxt: u32,
-    #[allow(dead_code)]
     pub wnd: u16,
     pub irs: u32,
 }

@@ -64,6 +64,13 @@ impl<'a> Ipv4Packet<'a> {
 
         let total_len = u16::from_be_bytes([raw[2], raw[3]]) as usize;
 
+        if total_len < header_len {
+            return Err(MagnumError::Ipv4TotalLenTooSmall {
+                total_len,
+                header_len,
+            });
+        }
+
         if total_len > raw.len() {
             return Err(MagnumError::Ipv4TruncatedPacket {
                 total_len,
