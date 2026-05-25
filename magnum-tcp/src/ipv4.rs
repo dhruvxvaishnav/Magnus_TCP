@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::error::{MagnumError, Result};
 
 pub const IPV4_MIN_HEADER_LEN: usize = 20;
@@ -115,6 +117,40 @@ pub fn checksum(data: &[u8]) -> u16 {
     }
 
     !(sum as u16)
+}
+
+pub fn build_packet(src: [u8; 4], dst: [u8; 4], protocol: u8, payload: &[u8]) -> Vec<u8> {
+    let total_len = (IPV4_MIN_HEADER_LEN + payload.len()) as u16;
+    let mut hdr = [
+        0x45u8,
+        0x00,
+        (total_len >> 8) as u8,
+        total_len as u8,
+        0x00,
+        0x00,
+        0x40,
+        0x00,
+        0x40,
+        protocol,
+        0x00,
+        0x00,
+        src[0],
+        src[1],
+        src[2],
+        src[3],
+        dst[0],
+        dst[1],
+        dst[2],
+        dst[3],
+    ];
+    let csum = checksum(&hdr);
+    hdr[10] = (csum >> 8) as u8;
+    hdr[11] = csum as u8;
+
+    let mut pkt = Vec::with_capacity(IPV4_MIN_HEADER_LEN + payload.len());
+    pkt.extend_from_slice(&hdr);
+    pkt.extend_from_slice(payload);
+    pkt
 }
 
 pub fn format_ip(addr: &[u8; 4]) -> String {

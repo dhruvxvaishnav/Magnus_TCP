@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::error::{MagnumError, Result};
 
 pub const ETHERTYPE_IPV4: u16 = 0x0800;
@@ -12,6 +14,15 @@ pub struct EthernetFrame<'a> {
 }
 
 impl<'a> EthernetFrame<'a> {
+    pub fn build(dst_mac: [u8; 6], src_mac: [u8; 6], payload: &[u8]) -> Vec<u8> {
+        let mut frame = Vec::with_capacity(ETHERNET_HEADER_LEN + payload.len());
+        frame.extend_from_slice(&dst_mac);
+        frame.extend_from_slice(&src_mac);
+        frame.extend_from_slice(&ETHERTYPE_IPV4.to_be_bytes());
+        frame.extend_from_slice(payload);
+        frame
+    }
+
     pub fn parse(raw: &'a [u8]) -> Result<Self> {
         if raw.len() < ETHERNET_HEADER_LEN {
             return Err(MagnumError::EthernetFrameTooShort {

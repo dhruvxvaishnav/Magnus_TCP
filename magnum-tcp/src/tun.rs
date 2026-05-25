@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::error::{MagnumError, Result};
 
 #[cfg(target_os = "linux")]
@@ -8,7 +10,7 @@ mod linux {
     use std::os::unix::io::AsRawFd;
 
     const TUNSETIFF: libc::c_ulong = 0x400454CA;
-    const IFF_TUN: libc::c_short = 0x0001;
+    const IFF_TAP: libc::c_short = 0x0002;
     const IFF_NO_PI: libc::c_short = 0x1000;
 
     #[repr(C)]
@@ -44,7 +46,7 @@ mod linux {
                 .write(true)
                 .open("/dev/net/tun")?;
 
-            let mut req = Ifreq::new(name, IFF_TUN | IFF_NO_PI);
+            let mut req = Ifreq::new(name, IFF_TAP | IFF_NO_PI);
 
             let ret = unsafe {
                 libc::ioctl(
