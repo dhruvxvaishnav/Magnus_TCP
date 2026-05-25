@@ -24,7 +24,11 @@ mod linux {
             let bytes = name.as_bytes();
             let len = bytes.len().min(15);
             ifr_name[..len].copy_from_slice(&bytes[..len]);
-            Self { ifr_name, ifr_flags: flags, _pad: [0u8; 22] }
+            Self {
+                ifr_name,
+                ifr_flags: flags,
+                _pad: [0u8; 22],
+            }
         }
     }
 
@@ -54,7 +58,10 @@ mod linux {
                 return Err(MagnumError::Tun(std::io::Error::last_os_error()));
             }
 
-            Ok(Self { file, name: name.to_string() })
+            Ok(Self {
+                file,
+                name: name.to_string(),
+            })
         }
 
         pub fn name(&self) -> &str {

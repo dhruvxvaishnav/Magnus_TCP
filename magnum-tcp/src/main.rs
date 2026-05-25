@@ -5,7 +5,7 @@ mod tun;
 
 use error::MagnumError;
 use ethernet::EthernetFrame;
-use ipv4::{format_ip, Ipv4Packet, PROTO_ICMP, PROTO_TCP};
+use ipv4::{Ipv4Packet, PROTO_ICMP, PROTO_TCP, format_ip};
 use tracing::{error, info, warn};
 
 const TUN_NAME: &str = "tun0";
@@ -64,7 +64,10 @@ fn dispatch(raw: &[u8]) {
     let frame = match EthernetFrame::parse(raw) {
         Ok(f) => f,
         Err(MagnumError::NonIpv4EtherType(et)) => {
-            warn!(ethertype = format!("0x{:04X}", et), "dropped non-IPv4 frame");
+            warn!(
+                ethertype = format!("0x{:04X}", et),
+                "dropped non-IPv4 frame"
+            );
             return;
         }
         Err(e) => {
@@ -86,13 +89,28 @@ fn dispatch(raw: &[u8]) {
 
     match packet.header.protocol {
         PROTO_ICMP => {
-            info!(src = src, dst = dst, payload_len = packet.payload.len(), "ICMP packet received");
+            info!(
+                src = src,
+                dst = dst,
+                payload_len = packet.payload.len(),
+                "ICMP packet received"
+            );
         }
         PROTO_TCP => {
-            info!(src = src, dst = dst, payload_len = packet.payload.len(), "TCP segment received (unhandled)");
+            info!(
+                src = src,
+                dst = dst,
+                payload_len = packet.payload.len(),
+                "TCP segment received (unhandled)"
+            );
         }
         proto => {
-            warn!(src = src, dst = dst, protocol = proto, "unknown protocol dropped");
+            warn!(
+                src = src,
+                dst = dst,
+                protocol = proto,
+                "unknown protocol dropped"
+            );
         }
     }
 }

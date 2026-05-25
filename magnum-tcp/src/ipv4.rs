@@ -128,14 +128,26 @@ mod tests {
     fn valid_ipv4_header(protocol: u8, payload_len: u16) -> Vec<u8> {
         let total_len = (IPV4_MIN_HEADER_LEN as u16) + payload_len;
         let mut hdr = vec![
-            0x45, 0x00,
-            (total_len >> 8) as u8, total_len as u8,
-            0x00, 0x01,
-            0x40, 0x00,
-            0x40, protocol,
-            0x00, 0x00,
-            192, 168, 1, 1,
-            10, 0, 0, 1,
+            0x45,
+            0x00,
+            (total_len >> 8) as u8,
+            total_len as u8,
+            0x00,
+            0x01,
+            0x40,
+            0x00,
+            0x40,
+            protocol,
+            0x00,
+            0x00,
+            192,
+            168,
+            1,
+            1,
+            10,
+            0,
+            0,
+            1,
         ];
         let csum = checksum(&hdr);
         hdr[10] = (csum >> 8) as u8;
@@ -191,15 +203,19 @@ mod tests {
 
     #[test]
     fn checksum_known_value() {
-        let data: &[u8] = &[0x45, 0x00, 0x00, 0x3c, 0x1c, 0x46, 0x40, 0x00,
-                             0x40, 0x06, 0x00, 0x00, 0xac, 0x10, 0x0a, 0x63,
-                             0xac, 0x10, 0x0a, 0x0c];
+        let data: &[u8] = &[
+            0x45, 0x00, 0x00, 0x3c, 0x1c, 0x46, 0x40, 0x00, 0x40, 0x06, 0x00, 0x00, 0xac, 0x10,
+            0x0a, 0x63, 0xac, 0x10, 0x0a, 0x0c,
+        ];
         let csum = checksum(data);
-        assert_eq!(checksum(&{
-            let mut v = data.to_vec();
-            v[10] = (csum >> 8) as u8;
-            v[11] = csum as u8;
-            v
-        }), 0);
+        assert_eq!(
+            checksum(&{
+                let mut v = data.to_vec();
+                v[10] = (csum >> 8) as u8;
+                v[11] = csum as u8;
+                v
+            }),
+            0
+        );
     }
 }
