@@ -105,6 +105,7 @@ To achieve "production grade," the stack must survive hostile network environmen
 ### Milestone 5: Teardown & Edge Cases
 * [ ] Implement the active/passive close state machine (`FIN`, `ACK`, `TIME-WAIT`).
 * [ ] Handle edge cases: Zero-window probing, simultaneous open/close.
+* **Acceptance Criteria:** All 11 TCP states exercised in integration test; TIME-WAIT timer expires without fd/memory leak (verified via `valgrind` or Rust's address sanitizer).
 
 ---
 
@@ -113,3 +114,31 @@ To achieve "production grade," the stack must survive hostile network environmen
 * UDP and ICMP (beyond basic ignoring/dropping).
 * Hardware offloading (Checksum Offload - TSO/LRO).
 * SACK (Selective Acknowledgments - RFC 2018) - *can be added as an extension later*.
+
+---
+
+## 8. Implementation Decisions & Clarifications
+
+### 8.1 OS Target
+Primary target is **Linux** (kernel ≥ 4.4). The `tun0` device is opened via `/dev/net/tun` with `IFF_TUN | IFF_NO_PI`. macOS (`utun`) is a stretch goal requiring a separate driver path and is out of scope for v1.0.
+
+### 8.2 ARP Handling
+Raw `TUN` mode (Layer 3) does not receive Ethernet frames, so ARP does not apply at the TUN layer. However, for the host to route packets to the stack's virtual IP, the operator must configure a static route:
+```
+ip addr add 192.168.100.1/24 dev tun0
+ip link set tun0 up
+```
+The stack's virtual IP is `192.168.100.2`. No ARP implementation is required.
+
+### 8.3 Buffer Sizes
+* **Per-read staging buffer:** 2 × MTU = 3584 bytes. Holds one max-size packet with headroom.
+* **Per-TCB receive buffer:** 64 KB. Determines the maximum advertised window.
+* **Retransmission queue:** Bounded at 128 segments per connection.
+
+### 8.4 Error Handling Strategy
+* Parse errors (malformed packets, bad checksums) are **non-fatal**: log at WARN level and drop the packet.
+* I/O errors on the TUN fd are **fatal**: log at ERROR level and exit.
+* TCB-level errors (unexpected segment in wrong state) are non-fatal: log and send RST where RFC 793 requires it.
+
+### 8.5 Concurrency Model
+The dispatch loop runs on a single `tokio` task reading from the TUN fd. Each accepted TCP connection gets its own `tokio::spawn`-ed task owning the TCB. The dispatch loop sends segments to the correct TCB via `tokio::sync::mpsc` channel keyed on `(src_ip, src_port, dst_port)`.
