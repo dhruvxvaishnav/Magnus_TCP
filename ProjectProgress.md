@@ -1,6 +1,48 @@
 # ProjectProgress.md — Magnum-TCP
 
-## Current Phase: Phase 5 — Chaos Engineering / Live Integration
+## Current Phase: Phase 6 — Live Integration / Portfolio Demo
+
+---
+
+## Session 5 — 2026-05-26
+
+### Completed
+- [x] `src/pcap.rs` (NEW) — `PcapWriter<W: Write>`: generic PCAP writer, 24-byte global header (magic `0xa1b2c3d4` LE, version 2.4, snaplen 65535, configurable linktype), 16-byte per-packet records (ts_sec, ts_usec, incl_len, orig_len); `create_file_writer()` convenience constructor; 4 unit tests using `Vec<u8>` as writer (no temp files needed)
+- [x] `src/tcp/tcb.rs` — Added `new_for_connect()` constructor (active-open side): identical to `new_for_listen()` except `state: TcbState::Closed`
+- [x] `src/tcp/connection.rs` — Phase 5 additions:
+  - `connect()` — Closed→SynSent, builds bare SYN (no ACK), advances `snd.nxt = iss + 1`
+  - `handle_syn_sent()` — RST→Closed; SYN+ACK (normal path): validate `ack_acceptable`, set `rcv` state, allocate `RecvBuffer`, transition→Established, return ACK; SYN only (simultaneous open): set `rcv` state, transition→SynReceived, return SYN-ACK
+  - `build_syn()` — bare SYN segment at `snd.iss`
+  - `zero_window_probe()` — sends 1-byte probe from `send_buf` when in Established and `snd.wnd == 0`; returns `None` when window is open or buffer empty
+  - `process_segment` match extended to cover SynSent and Closed explicitly (11 total arms)
+  - 8 new tests: `connect_transitions_to_syn_sent`, `syn_sent_transitions_to_established_on_syn_ack`, `syn_sent_rst_closes_connection`, `syn_sent_simultaneous_open_goes_to_syn_received`, `zero_window_probe_sends_one_byte_when_window_closed`, `zero_window_probe_returns_none_when_window_open`, `next_segment_blocked_when_window_zero`, `all_11_tcp_states_exercised`
+- [x] `src/main.rs` — wired `mod pcap;`; PCAP capture of both inbound (TUN read) and outbound (response) packets to `capture.pcap`; silently disabled on file-open error; OS-conditional linktype (LINKTYPE_ETHERNET on Linux, LINKTYPE_IPV4 on macOS)
+- [x] `cargo fmt --all` — clean
+- [x] `cargo clippy -- -D warnings` — zero warnings
+- [x] All 85 tests pass
+
+### Phase 5 Acceptance Criteria Status
+- [x] PCAP output to `capture.pcap` on every run (unit tested: global header + per-packet records)
+- [x] Zero-window probing when remote window = 0 (unit tested)
+- [x] Simultaneous open: SYN_SENT receives SYN → SYN_RECEIVED → ESTABLISHED (unit tested)
+- [x] Active open (client side): Closed → SYN_SENT → ESTABLISHED full path (unit tested)
+- [x] All 11 TCP states exercised in a single integration test (`all_11_tcp_states_exercised`)
+- [ ] Live Linux end-to-end: `nc <virtual_ip> 80`, Wireshark opens `capture.pcap` and shows full handshake + data + FIN (requires Linux + TAP device)
+- [ ] 10 MB transfer over chaos link (10% loss) with Fast Retransmit entries in logs (requires Linux)
+- [ ] Valgrind / ASAN: TIME_WAIT expires without fd or memory leak (requires Linux)
+
+### Test Results
+```
+running 85 tests ... test result: ok. 85 passed; 0 failed
+```
+`cargo fmt --all` clean | `cargo clippy -- -D warnings` zero warnings
+
+### What Is Next (Phase 6)
+- Live Linux end-to-end integration test: bring up TAP interface, run `magnum-tcp`, connect with `nc` or `curl`, verify handshake + data + FIN sequence in Wireshark from `capture.pcap`
+- CLI `--chaos <drop_rate>` flag (via `clap`) to enable `ChaosMiddleware` at runtime
+- 10 MB transfer over 10% simulated loss with `--chaos 0.10`; confirm Fast Retransmit appears in logs
+- Zero-window probe automatic timer: drive `zero_window_probe()` from a `tokio::time::interval` in the event loop instead of caller-manual invocation
+- Valgrind / ASAN check: exercise all 11 states, verify no leaks after TIME_WAIT expiry
 
 ---
 

@@ -2,6 +2,7 @@ mod chaos;
 mod error;
 mod ethernet;
 mod ipv4;
+mod pcap;
 mod tcp;
 mod tun;
 
@@ -58,6 +59,15 @@ fn run() {
     let mut stack = Stack::new();
     stack.listen(LISTEN_PORT);
 
+    #[cfg(target_os = "linux")]
+    let pcap_linktype = pcap::LINKTYPE_ETHERNET;
+    #[cfg(target_os = "macos")]
+    let pcap_linktype = pcap::LINKTYPE_IPV4;
+
+    let mut pcap_writer = pcap::create_file_writer("capture.pcap", pcap_linktype)
+        .map_err(|e| warn!("pcap disabled: {e}"))
+        .ok();
+
     let mut buf = [0u8; STAGING_BUF];
 
     loop {
@@ -70,8 +80,15 @@ fn run() {
             }
         };
 
+        if let Some(ref mut pw) = pcap_writer {
+            let _ = pw.write_packet(&buf[..n]);
+        }
+
         match dispatch(&buf[..n], &mut stack) {
             Some(response) => {
+                if let Some(ref mut pw) = pcap_writer {
+                    let _ = pw.write_packet(&response);
+                }
                 if let Err(e) = tun.send(&response) {
                     warn!("write error: {}", e);
                 }

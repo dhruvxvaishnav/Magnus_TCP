@@ -43,7 +43,8 @@ impl Connection {
             TcbState::Closing => self.handle_closing(seg),
             TcbState::LastAck => self.handle_last_ack(seg),
             TcbState::TimeWait => self.handle_time_wait(seg),
-            TcbState::SynSent | TcbState::Closed => {
+            TcbState::SynSent => self.handle_syn_sent(seg),
+            TcbState::Closed => {
                 warn!(state = ?self.tcb.state, "segment in unhandled state dropped");
                 Ok(None)
             }
@@ -169,6 +170,47 @@ impl Connection {
         false
     }
 
+    pub fn connect(&mut self) -> Option<Vec<u8>> {
+        if self.tcb.state != TcbState::Closed {
+            return None;
+        }
+        let syn = self.build_syn();
+        self.tcb.snd.nxt = self.tcb.snd.iss.wrapping_add(1);
+        self.tcb.state = TcbState::SynSent;
+        info!(
+            local_port = self.tcb.local_port,
+            iss = self.tcb.snd.iss,
+            "CLOSED -> SYN_SENT"
+        );
+        Some(syn)
+    }
+
+    pub fn zero_window_probe(&mut self) -> Option<Vec<u8>> {
+        if self.tcb.state != TcbState::Established || self.tcb.snd.wnd != 0 {
+            return None;
+        }
+        let (seq, payload) = self.send_buf.next_segment(1)?;
+        self.send_buf.advance_nxt(1);
+        self.tcb.snd.nxt = self.send_buf.nxt();
+        Some(
+            SegmentBuilder::new(
+                self.tcb.local_ip,
+                self.tcb.remote_ip,
+                self.tcb.local_port,
+                self.tcb.remote_port,
+            )
+            .seq(seq)
+            .ack(self.tcb.rcv.nxt)
+            .flags(TcpFlags {
+                ack: true,
+                ..TcpFlags::default()
+            })
+            .window(self.current_window())
+            .payload(&payload)
+            .build(),
+        )
+    }
+
     fn current_window(&self) -> u16 {
         self.recv_buf
             .as_ref()
@@ -204,6 +246,41 @@ impl Connection {
         );
 
         Ok(Some(self.build_syn_ack()))
+    }
+
+    fn handle_syn_sent(&mut self, seg: &TcpSegment<'_>) -> Result<Option<Vec<u8>>> {
+        if seg.header.flags.rst {
+            self.tcb.state = TcbState::Closed;
+            info!("SYN_SENT -> CLOSED (RST)");
+            return Ok(None);
+        }
+
+        if seg.header.flags.syn && seg.header.flags.ack {
+            if !ack_acceptable(self.tcb.snd.una, seg.header.ack_num, self.tcb.snd.nxt) {
+                return Ok(Some(self.build_rst(seg.header.ack_num)));
+            }
+            self.tcb.snd.una = seg.header.ack_num;
+            self.tcb.snd.wnd = seg.header.window;
+            self.tcb.rcv.irs = seg.header.seq;
+            self.tcb.rcv.nxt = seg.header.seq.wrapping_add(1);
+            self.recv_buf = Some(RecvBuffer::new(seg.header.seq));
+            self.tcb.state = TcbState::Established;
+            info!(local_port = self.tcb.local_port, "SYN_SENT -> ESTABLISHED");
+            return Ok(Some(self.build_ack()));
+        }
+
+        if seg.header.flags.syn {
+            // RFC 793: simultaneous open
+            self.tcb.rcv.irs = seg.header.seq;
+            self.tcb.rcv.nxt = seg.header.seq.wrapping_add(1);
+            self.recv_buf = Some(RecvBuffer::new(seg.header.seq));
+            self.tcb.snd.wnd = seg.header.window;
+            self.tcb.state = TcbState::SynReceived;
+            info!("SYN_SENT -> SYN_RECEIVED (simultaneous open)");
+            return Ok(Some(self.build_syn_ack()));
+        }
+
+        Ok(None)
     }
 
     fn handle_syn_received(&mut self, seg: &TcpSegment<'_>) -> Result<Option<Vec<u8>>> {
@@ -438,6 +515,21 @@ impl Connection {
             .payload(&payload)
             .build(),
         )
+    }
+
+    fn build_syn(&self) -> Vec<u8> {
+        SegmentBuilder::new(
+            self.tcb.local_ip,
+            self.tcb.remote_ip,
+            self.tcb.local_port,
+            self.tcb.remote_port,
+        )
+        .seq(self.tcb.snd.iss)
+        .flags(TcpFlags {
+            syn: true,
+            ..TcpFlags::default()
+        })
+        .build()
     }
 
     fn build_syn_ack(&self) -> Vec<u8> {
@@ -1188,5 +1280,231 @@ mod tests {
         assert!(resp.is_some());
         let ack_seg = parse_response(resp.as_ref().unwrap());
         assert!(ack_seg.header.flags.ack);
+    }
+
+    // ── active open / SYN_SENT tests ──────────────────────────────────────────
+
+    #[test]
+    fn connect_transitions_to_syn_sent() {
+        let tcb = Tcb::new_for_connect(SERVER_IP, SERVER_PORT, CLIENT_IP, CLIENT_PORT);
+        let mut conn = Connection::new(tcb);
+        let syn_raw = conn.connect().unwrap();
+        assert_eq!(conn.tcb.state, TcbState::SynSent);
+
+        let syn = TcpSegment::parse(&syn_raw, SERVER_IP, CLIENT_IP).unwrap();
+        assert!(syn.header.flags.syn);
+        assert!(!syn.header.flags.ack);
+        assert_eq!(syn.header.seq, conn.tcb.snd.iss);
+    }
+
+    #[test]
+    fn syn_sent_transitions_to_established_on_syn_ack() {
+        let tcb = Tcb::new_for_connect(SERVER_IP, SERVER_PORT, CLIENT_IP, CLIENT_PORT);
+        let mut conn = Connection::new(tcb);
+        let syn_raw = conn.connect().unwrap();
+        let our_syn = TcpSegment::parse(&syn_raw, SERVER_IP, CLIENT_IP).unwrap();
+
+        let syn_ack = SegmentBuilder::new(CLIENT_IP, SERVER_IP, CLIENT_PORT, SERVER_PORT)
+            .seq(CLIENT_ISN)
+            .ack(our_syn.header.seq.wrapping_add(1))
+            .flags(TcpFlags {
+                syn: true,
+                ack: true,
+                ..TcpFlags::default()
+            })
+            .build();
+
+        let resp = conn
+            .process_segment(&TcpSegment::parse(&syn_ack, CLIENT_IP, SERVER_IP).unwrap())
+            .unwrap();
+        assert!(resp.is_some());
+        assert_eq!(conn.tcb.state, TcbState::Established);
+
+        let ack = TcpSegment::parse(resp.as_ref().unwrap(), SERVER_IP, CLIENT_IP).unwrap();
+        assert!(ack.header.flags.ack);
+        assert_eq!(ack.header.ack_num, CLIENT_ISN + 1);
+    }
+
+    #[test]
+    fn syn_sent_rst_closes_connection() {
+        let tcb = Tcb::new_for_connect(SERVER_IP, SERVER_PORT, CLIENT_IP, CLIENT_PORT);
+        let mut conn = Connection::new(tcb);
+        let syn_raw = conn.connect().unwrap();
+        let our_syn = TcpSegment::parse(&syn_raw, SERVER_IP, CLIENT_IP).unwrap();
+
+        let rst = SegmentBuilder::new(CLIENT_IP, SERVER_IP, CLIENT_PORT, SERVER_PORT)
+            .seq(our_syn.header.seq.wrapping_add(1))
+            .flags(TcpFlags {
+                rst: true,
+                ..TcpFlags::default()
+            })
+            .build();
+        conn.process_segment(&TcpSegment::parse(&rst, CLIENT_IP, SERVER_IP).unwrap())
+            .unwrap();
+        assert_eq!(conn.tcb.state, TcbState::Closed);
+    }
+
+    #[test]
+    fn syn_sent_simultaneous_open_goes_to_syn_received() {
+        let tcb = Tcb::new_for_connect(SERVER_IP, SERVER_PORT, CLIENT_IP, CLIENT_PORT);
+        let mut conn = Connection::new(tcb);
+        conn.connect().unwrap();
+
+        let peer_syn = SegmentBuilder::new(CLIENT_IP, SERVER_IP, CLIENT_PORT, SERVER_PORT)
+            .seq(CLIENT_ISN)
+            .flags(TcpFlags {
+                syn: true,
+                ..TcpFlags::default()
+            })
+            .build();
+        let resp = conn
+            .process_segment(&TcpSegment::parse(&peer_syn, CLIENT_IP, SERVER_IP).unwrap())
+            .unwrap();
+        assert_eq!(conn.tcb.state, TcbState::SynReceived);
+        assert!(resp.is_some());
+        let syn_ack = TcpSegment::parse(resp.as_ref().unwrap(), SERVER_IP, CLIENT_IP).unwrap();
+        assert!(syn_ack.header.flags.syn && syn_ack.header.flags.ack);
+    }
+
+    // ── zero-window probe tests ───────────────────────────────────────────────
+
+    #[test]
+    fn zero_window_probe_sends_one_byte_when_window_closed() {
+        let (mut conn, _) = establish_connection();
+        conn.tcb.snd.wnd = 0;
+        conn.write_data(b"blocked data");
+
+        let probe_raw = conn.zero_window_probe().unwrap();
+        let probe = parse_response(&probe_raw);
+        assert_eq!(probe.payload.len(), 1);
+        assert_eq!(probe.payload, &b"blocked data"[..1]);
+    }
+
+    #[test]
+    fn zero_window_probe_returns_none_when_window_open() {
+        let (mut conn, _) = establish_connection();
+        conn.write_data(b"data");
+        assert!(conn.zero_window_probe().is_none());
+    }
+
+    #[test]
+    fn next_segment_blocked_when_window_zero() {
+        let (mut conn, _) = establish_connection();
+        conn.tcb.snd.wnd = 0;
+        conn.write_data(b"blocked");
+        assert!(conn.next_segment_to_send(1400).is_none());
+    }
+
+    // ── all-11-states integration test ────────────────────────────────────────
+
+    #[test]
+    fn all_11_tcp_states_exercised() {
+        let mut visited: Vec<TcbState> = Vec::new();
+
+        // ── Passive open: LISTEN → SYN_RECEIVED → ESTABLISHED → CLOSE_WAIT → LAST_ACK → CLOSED
+        let mut conn = make_connection();
+        visited.push(conn.tcb.state);
+        assert_eq!(conn.tcb.state, TcbState::Listen);
+
+        let syn = SegmentBuilder::new(CLIENT_IP, SERVER_IP, CLIENT_PORT, SERVER_PORT)
+            .seq(CLIENT_ISN)
+            .flags(TcpFlags {
+                syn: true,
+                ..TcpFlags::default()
+            })
+            .build();
+        let syn_ack_raw = conn.process_segment(&parse_segment(&syn)).unwrap().unwrap();
+        let server_isn = parse_response(&syn_ack_raw).header.seq;
+        visited.push(conn.tcb.state);
+        assert_eq!(conn.tcb.state, TcbState::SynReceived);
+
+        let ack = SegmentBuilder::new(CLIENT_IP, SERVER_IP, CLIENT_PORT, SERVER_PORT)
+            .seq(CLIENT_ISN + 1)
+            .ack(server_isn.wrapping_add(1))
+            .flags(TcpFlags {
+                ack: true,
+                ..TcpFlags::default()
+            })
+            .build();
+        conn.process_segment(&parse_segment(&ack)).unwrap();
+        visited.push(conn.tcb.state);
+        assert_eq!(conn.tcb.state, TcbState::Established);
+
+        let remote_fin = client_fin(CLIENT_ISN + 1, server_isn.wrapping_add(1));
+        conn.process_segment(&parse_segment(&remote_fin)).unwrap();
+        visited.push(conn.tcb.state);
+        assert_eq!(conn.tcb.state, TcbState::CloseWait);
+
+        conn.initiate_close().unwrap();
+        visited.push(conn.tcb.state);
+        assert_eq!(conn.tcb.state, TcbState::LastAck);
+
+        let fin_ack = client_ack(server_isn.wrapping_add(2));
+        conn.process_segment(&parse_segment(&fin_ack)).unwrap();
+        visited.push(conn.tcb.state);
+        assert_eq!(conn.tcb.state, TcbState::Closed);
+
+        // ── Active close: FIN_WAIT_1 → FIN_WAIT_2 → TIME_WAIT → (CLOSED via timer)
+        let (mut conn2, server_isn2) = establish_connection();
+        conn2.initiate_close().unwrap();
+        visited.push(conn2.tcb.state);
+        assert_eq!(conn2.tcb.state, TcbState::FinWait1);
+
+        let ack2 = client_ack(server_isn2.wrapping_add(2));
+        conn2.process_segment(&parse_segment(&ack2)).unwrap();
+        visited.push(conn2.tcb.state);
+        assert_eq!(conn2.tcb.state, TcbState::FinWait2);
+
+        let peer_fin2 = client_fin(CLIENT_ISN + 1, server_isn2.wrapping_add(2));
+        conn2.process_segment(&parse_segment(&peer_fin2)).unwrap();
+        visited.push(conn2.tcb.state);
+        assert_eq!(conn2.tcb.state, TcbState::TimeWait);
+
+        conn2.tick_time_wait(Instant::now() + Duration::from_secs(61));
+        assert_eq!(conn2.tcb.state, TcbState::Closed);
+
+        // ── Simultaneous close: CLOSING
+        let (mut conn3, server_isn3) = establish_connection();
+        conn3.initiate_close().unwrap();
+        let peer_fin3 = client_fin(CLIENT_ISN + 1, server_isn3.wrapping_add(1));
+        conn3.process_segment(&parse_segment(&peer_fin3)).unwrap();
+        visited.push(conn3.tcb.state);
+        assert_eq!(conn3.tcb.state, TcbState::Closing);
+
+        // ── Active open: CLOSED → SYN_SENT → ESTABLISHED
+        let tcb = Tcb::new_for_connect(SERVER_IP, 12345, CLIENT_IP, CLIENT_PORT);
+        let mut conn4 = Connection::new(tcb);
+        conn4.connect().unwrap();
+        visited.push(conn4.tcb.state);
+        assert_eq!(conn4.tcb.state, TcbState::SynSent);
+
+        assert!(visited.contains(&TcbState::Listen), "LISTEN not visited");
+        assert!(
+            visited.contains(&TcbState::SynReceived),
+            "SYN_RECEIVED not visited"
+        );
+        assert!(
+            visited.contains(&TcbState::Established),
+            "ESTABLISHED not visited"
+        );
+        assert!(
+            visited.contains(&TcbState::CloseWait),
+            "CLOSE_WAIT not visited"
+        );
+        assert!(visited.contains(&TcbState::LastAck), "LAST_ACK not visited");
+        assert!(
+            visited.contains(&TcbState::FinWait1),
+            "FIN_WAIT_1 not visited"
+        );
+        assert!(
+            visited.contains(&TcbState::FinWait2),
+            "FIN_WAIT_2 not visited"
+        );
+        assert!(
+            visited.contains(&TcbState::TimeWait),
+            "TIME_WAIT not visited"
+        );
+        assert!(visited.contains(&TcbState::Closing), "CLOSING not visited");
+        assert!(visited.contains(&TcbState::SynSent), "SYN_SENT not visited");
     }
 }

@@ -78,6 +78,36 @@ impl Tcb {
             dup_ack_count: 0,
         }
     }
+
+    pub fn new_for_connect(
+        local_ip: [u8; 4],
+        local_port: u16,
+        remote_ip: [u8; 4],
+        remote_port: u16,
+    ) -> Self {
+        let iss = generate_isn(local_ip, local_port, remote_ip, remote_port);
+        Self {
+            state: TcbState::Closed,
+            local_ip,
+            local_port,
+            remote_ip,
+            remote_port,
+            snd: SendSequence {
+                una: iss,
+                nxt: iss,
+                wnd: 65535,
+                iss,
+            },
+            rcv: RecvSequence {
+                nxt: 0,
+                wnd: 65535,
+                irs: 0,
+            },
+            cwnd: 1460,
+            ssthresh: 65535,
+            dup_ack_count: 0,
+        }
+    }
 }
 
 // RFC 793 §3.3: a < b in modular 32-bit space
