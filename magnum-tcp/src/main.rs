@@ -1,3 +1,4 @@
+mod chaos;
 mod error;
 mod ethernet;
 mod ipv4;

@@ -43,6 +43,9 @@ pub struct Tcb {
     pub remote_port: u16,
     pub snd: SendSequence,
     pub rcv: RecvSequence,
+    pub cwnd: u32,
+    pub ssthresh: u32,
+    pub dup_ack_count: u8,
 }
 
 impl Tcb {
@@ -70,6 +73,9 @@ impl Tcb {
                 wnd: 65535,
                 irs: 0,
             },
+            cwnd: 1460,
+            ssthresh: 65535,
+            dup_ack_count: 0,
         }
     }
 }

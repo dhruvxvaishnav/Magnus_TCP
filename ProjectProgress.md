@@ -1,6 +1,53 @@
 # ProjectProgress.md — Magnum-TCP
 
-## Current Phase: Phase 4 — Congestion Control / Active Close
+## Current Phase: Phase 5 — Chaos Engineering / Live Integration
+
+---
+
+## Session 4 — 2026-05-26
+
+### Completed
+- [x] `src/tcp/retransmit.rs` — `RetransmitQueue`: RTT-sampled RTO (Karn's algorithm + RFC 6298 SRTT/RTTVAR), exponential backoff on retransmit, 128-segment bounded queue, `expired_segments()`, `first_unacked()` for fast retransmit; 6 unit tests
+- [x] `src/chaos.rs` — `ChaosMiddleware`: configurable drop rate, reorder rate, jitter; xorshift64 PRNG (no external deps); `intercept()` / `flush_ready()` API; 4 unit tests
+- [x] `src/tcp/tcb.rs` — Added `cwnd: u32`, `ssthresh: u32`, `dup_ack_count: u8` to `Tcb`; initial values: `cwnd = 1460 (1 MSS)`, `ssthresh = 65535`
+- [x] `src/tcp/connection.rs` — Full Phase 4 overhaul:
+  - `next_segment_to_send` now enforces `min(cwnd, snd.wnd)` effective window; every sent segment is pushed to the retransmit queue
+  - `handle_established` implements RFC 5681 TCP Reno: slow start (cwnd += min(bytes_acked, MSS)), congestion avoidance (cwnd += MSS²/cwnd), duplicate ACK detection, fast retransmit (3 dup ACKs), fast recovery (cwnd inflate per extra dup ACK)
+  - `take_retransmits()` — returns expired in-flight segments as serialised TCP bytes; on RTO fires, resets to slow start (ssthresh = cwnd/2, cwnd = MSS)
+  - `initiate_close()` — ESTABLISHED→FIN_WAIT_1 (active close) and CLOSE_WAIT→LAST_ACK (passive close completion)
+  - `tick_time_wait(now)` — transitions TIME_WAIT→CLOSED after 2×MSL (60 s)
+  - All new close-state handlers: `handle_fin_wait_1`, `handle_fin_wait_2`, `handle_closing`, `handle_last_ack`, `handle_time_wait`
+  - 16 new tests covering every new code path
+- [x] `src/tcp/mod.rs` — wired `pub mod retransmit;`
+- [x] `src/main.rs` — wired `mod chaos;`
+- [x] `cargo fmt --all` — clean
+- [x] `cargo clippy -- -D warnings` — zero warnings
+- [x] All 73 tests pass
+
+### Phase 4 Acceptance Criteria Status
+- [x] Active close path exercised: FIN_WAIT_1 → FIN_WAIT_2 → TIME_WAIT (unit tested)
+- [x] Passive close path exercised: CLOSE_WAIT → LAST_ACK → CLOSED (unit tested)
+- [x] Simultaneous close via CLOSING state (unit tested)
+- [x] TIME_WAIT 2×MSL expiry → CLOSED (unit tested)
+- [x] RTO retransmit with exponential backoff (unit tested)
+- [x] Fast retransmit on 3 duplicate ACKs (unit tested)
+- [x] Slow start cwnd growth (unit tested)
+- [x] Congestion avoidance linear growth (unit tested)
+- [x] RTO resets cwnd to slow-start (unit tested)
+- [ ] 10MB transfer over chaos link with Fast Retransmit in logs (requires Linux + TAP device)
+
+### Test Results
+```
+running 73 tests ... test result: ok. 73 passed; 0 failed
+```
+`cargo fmt --all` clean | `cargo clippy -- -D warnings` zero warnings
+
+### What Is Next (Phase 5)
+- PCAP-compatible packet capture output (§5.2 of PRD) for Wireshark verification
+- Zero-window probing (send 1-byte probe when remote window = 0)
+- Simultaneous open (SYN_SENT state handler)
+- Live end-to-end test on Linux: `nc <virtual_ip> 80`, Wireshark capture, 10MB file transfer with `--chaos 0.10` CLI flag
+- Valgrind / ASAN check: all 11 states exercised, TIME_WAIT expires without leak
 
 ---
 
