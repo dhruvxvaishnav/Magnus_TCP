@@ -971,7 +971,7 @@ mod tests {
 
     #[test]
     fn fin_plus_ack_in_fin_wait_1_goes_to_time_wait() {
-        let (mut conn, server_isn) = establish_connection();
+        let (mut conn, _server_isn) = establish_connection();
         let our_fin_raw = conn.initiate_close().unwrap();
         let our_fin = parse_response(&our_fin_raw);
         assert_eq!(conn.tcb.state, TcbState::FinWait1);
@@ -1140,7 +1140,7 @@ mod tests {
 
     #[test]
     fn retransmit_completes_transfer() {
-        let (mut conn, server_isn) = establish_connection();
+        let (mut conn, _server_isn) = establish_connection();
         conn.retransmit_queue.rto = Duration::from_millis(2);
 
         let data = b"hello retransmit world";
