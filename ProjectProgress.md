@@ -4,6 +4,51 @@
 
 ---
 
+## Session 7 — 2026-05-28
+
+### Completed
+- [x] `src/tcp/mod.rs` — added `NewConnectionHandle { key, data_rx, send_tx, close_tx }`; updated `AsyncDispatch::dispatch()` to return `Option<NewConnectionHandle>` — creates `app_data_tx/rx`, `app_send_tx/rx`, `close_tx/rx` channels per new connection, passes them to `run_connection_task`, returns the handle to the caller
+- [x] `src/tcp/task.rs` — added `#[allow(clippy::too_many_arguments)]` for the 8-arg `run_connection_task`
+- [x] `src/arp.rs` — fixed 3 clippy `op_ref` warnings (`&arp[0..2] != X` → `arp[0..2] != X`)
+- [x] `src/main.rs` — Phase 7 full update:
+  - `mod arp;` added
+  - `--bind-ip <String>` CLI flag (default `"192.168.100.2"`)
+  - `--port` changed to multi-value: `Vec<u16>`, `clap::ArgAction::Append`, can be repeated
+  - `parse_ip(s)` helper — parses dotted-quad string to `[u8; 4]`, returns typed `MagnumError::InvalidIp` on failure
+  - Linux: reads TAP MAC via `tun_device.mac_address()`, falls back to hardcoded if unavailable
+  - `inbound_dispatch` signature changed to return `Option<Vec<u8>>` for ARP replies; passes `our_ip` and `our_mac`
+  - Linux `inbound_dispatch`: on `NonIpv4EtherType(0x0806)` calls `arp::parse_arp_request()`, checks `target_ip == our_ip`, builds and returns ARP reply frame
+  - Event loop: writes ARP reply frame immediately on `Some(reply_frame)` return from `inbound_dispatch`
+  - When `dispatch.dispatch()` returns `Some(NewConnectionHandle)`: `tokio::spawn(handle_connection(handle))`
+  - `handle_connection(handle)` async fn: reads `data_rx`, detects HTTP vs. raw data, sends HTTP 200 with `"Hello from Magnum-TCP!\r\n"` body or echoes raw data; sends `()` on `close_tx` when done
+- [x] `cargo fmt --all` — clean
+- [x] `cargo clippy -- -D warnings` — zero warnings
+- [x] All 94 tests pass (89 existing + 5 new)
+
+### Phase 7 Acceptance Criteria Status
+- [x] Application data pipeline wired: `data_rx` (TCP → app), `send_tx` (app → TCP), `close_tx` (app → FIN)
+- [x] ARP responder: answers ARP requests for `--bind-ip` address with correct TAP MAC
+- [x] `--bind-ip` CLI flag, multi-value `--port` CLI flag
+- [x] HTTP echo server: `handle_connection` sends HTTP 200 for GET/POST, echoes raw data otherwise
+- [x] `NewConnectionHandle` exposes per-connection channels for application-layer use
+- [ ] Live Linux end-to-end: `curl http://192.168.100.2/` returns "Hello from Magnum-TCP!" (requires Linux + TAP)
+- [ ] 10 MB transfer over `--chaos 0.10` with Fast Retransmit in logs (requires Linux)
+- [ ] Valgrind / ASAN: TIME_WAIT expires without fd or memory leak (requires Linux)
+
+### Test Results
+```
+running 94 tests ... test result: ok. 94 passed; 0 failed
+```
+`cargo fmt --all` clean | `cargo clippy -- -D warnings` zero warnings
+
+### What Is Next
+- Live Linux end-to-end test: `ip tuntap add dev tap0 mode tap`, `ip link set tap0 up`, assign IP route to `192.168.100.2/24`, run `magnum-tcp --bind-ip 192.168.100.2 --port 80`, `curl http://192.168.100.2/`
+- Verify ARP exchange in Wireshark/`capture.pcap`
+- 10 MB transfer with `--chaos 0.10`; confirm Fast Retransmit in structured logs
+- Valgrind / ASAN: exercise all 11 states, verify no leaks after TIME_WAIT expiry
+
+---
+
 ## Session 6 — 2026-05-28
 
 ### Completed

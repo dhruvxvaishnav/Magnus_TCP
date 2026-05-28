@@ -108,6 +108,13 @@ impl Default for Stack {
     }
 }
 
+pub struct NewConnectionHandle {
+    pub key: FourTuple,
+    pub data_rx: mpsc::Receiver<Vec<u8>>,
+    pub send_tx: mpsc::Sender<Vec<u8>>,
+    pub close_tx: mpsc::Sender<()>,
+}
+
 pub struct AsyncDispatch {
     listeners: HashMap<u16, ()>,
     channels: HashMap<FourTuple, mpsc::Sender<InboundMsg>>,
@@ -134,7 +141,7 @@ impl AsyncDispatch {
         ether_src: [u8; 6],
         ether_dst: [u8; 6],
         seg: &TcpSegment<'_>,
-    ) {
+    ) -> Option<NewConnectionHandle> {
         let key = FourTuple {
             remote_ip,
             remote_port: seg.header.src_port,
@@ -155,20 +162,32 @@ impl AsyncDispatch {
                 );
                 let conn = Connection::new(tcb);
                 let (inbound_tx, inbound_rx) = mpsc::channel(64);
+                let (app_data_tx, app_data_rx) = mpsc::channel(64);
+                let (app_send_tx, app_send_rx) = mpsc::channel(64);
+                let (close_tx, close_rx) = mpsc::channel(1);
                 tokio::spawn(task::run_connection_task(
                     conn,
                     inbound_rx,
                     self.outbound_tx.clone(),
                     ether_src,
                     ether_dst,
+                    app_data_tx,
+                    app_send_rx,
+                    close_rx,
                 ));
                 self.channels.insert(key, inbound_tx);
+                return Some(NewConnectionHandle {
+                    key,
+                    data_rx: app_data_rx,
+                    send_tx: app_send_tx,
+                    close_tx,
+                });
             } else {
                 warn!(
                     dst_port = seg.header.dst_port,
                     "segment for unknown connection"
                 );
-                return;
+                return None;
             }
         }
 
@@ -181,5 +200,7 @@ impl AsyncDispatch {
                 warn!(dst_port = key.local_port, "connection task gone, evicted");
             }
         }
+
+        None
     }
 }

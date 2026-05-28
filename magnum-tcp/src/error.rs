@@ -38,6 +38,9 @@ pub enum MagnumError {
 
     #[error("TCP checksum mismatch: computed 0x{computed:04X}, got 0x{got:04X}")]
     TcpChecksumMismatch { computed: u16, got: u16 },
+
+    #[error("invalid IP address: {0}")]
+    InvalidIp(String),
 }
 
 pub type Result<T> = std::result::Result<T, MagnumError>;

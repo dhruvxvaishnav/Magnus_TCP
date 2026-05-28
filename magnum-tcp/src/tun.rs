@@ -99,6 +99,40 @@ mod linux {
         pub fn write_frame_nb(&self, buf: &[u8]) -> std::io::Result<usize> {
             Ok((&self.file).write(buf)?)
         }
+
+        pub fn mac_address(&self) -> Option<[u8; 6]> {
+            #[repr(C)]
+            struct IfreqHwAddr {
+                ifr_name: [u8; 16],
+                ifr_hwaddr: libc::sockaddr,
+            }
+
+            let mut req: IfreqHwAddr = unsafe { std::mem::zeroed() };
+            let name_bytes = self.name.as_bytes();
+            let len = name_bytes.len().min(15);
+            req.ifr_name[..len].copy_from_slice(&name_bytes[..len]);
+
+            let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0) };
+            if fd < 0 {
+                return None;
+            }
+            let ret = unsafe {
+                libc::ioctl(
+                    fd,
+                    0x8927u64, // SIOCGIFHWADDR
+                    &mut req as *mut IfreqHwAddr as *mut libc::c_void,
+                )
+            };
+            unsafe { libc::close(fd) };
+            if ret < 0 {
+                return None;
+            }
+            let mut mac = [0u8; 6];
+            for (i, b) in mac.iter_mut().enumerate() {
+                *b = req.ifr_hwaddr.sa_data[i] as u8;
+            }
+            Some(mac)
+        }
     }
 
     impl std::os::unix::io::AsRawFd for Tun {
@@ -278,6 +312,10 @@ mod macos {
             (&self.file).write_vectored(&iov)?;
             Ok(buf.len())
         }
+
+        pub fn mac_address(&self) -> Option<[u8; 6]> {
+            None
+        }
     }
 
     impl std::os::unix::io::AsRawFd for Tun {
@@ -343,5 +381,9 @@ impl Tun {
             std::io::ErrorKind::Unsupported,
             "TUN is only supported on Linux and macOS",
         ))
+    }
+
+    pub fn mac_address(&self) -> Option<[u8; 6]> {
+        None
     }
 }
