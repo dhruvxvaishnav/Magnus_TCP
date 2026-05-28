@@ -77,6 +77,35 @@ mod linux {
         pub fn send(&mut self, buf: &[u8]) -> Result<usize> {
             Ok(self.file.write(buf)?)
         }
+
+        pub fn set_nonblocking(&self) -> Result<()> {
+            use std::os::unix::io::AsRawFd;
+            let fd = self.file.as_raw_fd();
+            let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+            if flags < 0 {
+                return Err(MagnumError::Tun(std::io::Error::last_os_error()));
+            }
+            let ret = unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
+            if ret < 0 {
+                return Err(MagnumError::Tun(std::io::Error::last_os_error()));
+            }
+            Ok(())
+        }
+
+        pub fn try_recv_nb(&self, buf: &mut [u8]) -> std::io::Result<usize> {
+            Ok((&self.file).read(buf)?)
+        }
+
+        pub fn write_frame_nb(&self, buf: &[u8]) -> std::io::Result<usize> {
+            Ok((&self.file).write(buf)?)
+        }
+    }
+
+    impl std::os::unix::io::AsRawFd for Tun {
+        fn as_raw_fd(&self) -> std::os::unix::io::RawFd {
+            use std::os::unix::io::AsRawFd;
+            self.file.as_raw_fd()
+        }
     }
 }
 
@@ -219,6 +248,43 @@ mod macos {
             self.file.write_vectored(&iov)?;
             Ok(buf.len())
         }
+
+        pub fn set_nonblocking(&self) -> Result<()> {
+            use std::os::unix::io::AsRawFd;
+            let fd = self.file.as_raw_fd();
+            let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+            if flags < 0 {
+                return Err(MagnumError::Tun(std::io::Error::last_os_error()));
+            }
+            let ret = unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
+            if ret < 0 {
+                return Err(MagnumError::Tun(std::io::Error::last_os_error()));
+            }
+            Ok(())
+        }
+
+        pub fn try_recv_nb(&self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let n = (&self.file).read(buf)?;
+            if n <= 4 {
+                return Ok(0);
+            }
+            buf.copy_within(4..n, 0);
+            Ok(n - 4)
+        }
+
+        pub fn write_frame_nb(&self, buf: &[u8]) -> std::io::Result<usize> {
+            let hdr = [0u8, 0, 0, 2];
+            let iov = [IoSlice::new(&hdr), IoSlice::new(buf)];
+            (&self.file).write_vectored(&iov)?;
+            Ok(buf.len())
+        }
+    }
+
+    impl std::os::unix::io::AsRawFd for Tun {
+        fn as_raw_fd(&self) -> std::os::unix::io::RawFd {
+            use std::os::unix::io::AsRawFd;
+            self.file.as_raw_fd()
+        }
     }
 }
 
@@ -256,5 +322,26 @@ impl Tun {
             std::io::ErrorKind::Unsupported,
             "TUN is only supported on Linux and macOS",
         )))
+    }
+
+    pub fn set_nonblocking(&self) -> Result<()> {
+        Err(MagnumError::Tun(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "TUN is only supported on Linux and macOS",
+        )))
+    }
+
+    pub fn try_recv_nb(&self, _buf: &mut [u8]) -> std::io::Result<usize> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "TUN is only supported on Linux and macOS",
+        ))
+    }
+
+    pub fn write_frame_nb(&self, _buf: &[u8]) -> std::io::Result<usize> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "TUN is only supported on Linux and macOS",
+        ))
     }
 }

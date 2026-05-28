@@ -6,11 +6,34 @@ mod pcap;
 mod tcp;
 mod tun;
 
+use clap::Parser;
 use tracing::error;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-use tracing::info;
 
-fn main() {
+#[derive(Parser)]
+#[command(
+    name = "magnum-tcp",
+    about = "Zero-dependency userspace TCP/IPv4 stack"
+)]
+struct Cli {
+    #[arg(long, default_value_t = 80)]
+    port: u16,
+
+    #[arg(long, default_value_t = 0.0, help = "Packet drop rate [0.0-1.0]")]
+    chaos: f64,
+
+    #[arg(long, default_value_t = 0.0, help = "Packet reorder rate [0.0-1.0]")]
+    chaos_reorder: f64,
+
+    #[arg(
+        long,
+        default_value_t = 0,
+        help = "Max outbound jitter in milliseconds"
+    )]
+    chaos_jitter_ms: u64,
+}
+
+#[tokio::main]
+async fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
@@ -26,38 +49,43 @@ fn main() {
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
-        info!("Magnum-TCP starting");
-        run();
+        use tracing::info;
+        let args = Cli::parse();
+        info!("Magnum-TCP starting on port {}", args.port);
+        if let Err(e) = run(args).await {
+            error!("fatal: {}", e);
+            std::process::exit(1);
+        }
     }
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn run() {
-    use crate::tcp::Stack;
-    use tracing::warn;
+async fn run(args: Cli) -> crate::error::Result<()> {
+    use crate::chaos::{ChaosConfig, ChaosMiddleware};
+    use crate::tcp::AsyncDispatch;
+    use crate::tcp::task::OutboundMsg;
+    use std::time::Instant;
+    use tokio::io::unix::AsyncFd;
+    use tokio::sync::mpsc;
+    use tracing::{info, warn};
 
     #[cfg(target_os = "linux")]
     const TUN_NAME: &str = "tun0";
     #[cfg(target_os = "macos")]
     const TUN_NAME: &str = "utun5";
 
-    const LISTEN_PORT: u16 = 80;
     const MTU: usize = 1500;
     const STAGING_BUF: usize = MTU * 2;
 
-    let mut tun = match tun::Tun::open(TUN_NAME) {
-        Ok(t) => {
-            info!("interface {} opened", t.name());
-            t
-        }
-        Err(e) => {
-            error!("failed to open device: {}", e);
-            std::process::exit(1);
-        }
-    };
+    let tun_device = tun::Tun::open(TUN_NAME)?;
+    tun_device.set_nonblocking()?;
+    info!("interface {} opened (async)", TUN_NAME);
 
-    let mut stack = Stack::new();
-    stack.listen(LISTEN_PORT);
+    let async_tun = AsyncFd::new(tun_device)?;
+
+    let (outbound_tx, mut outbound_rx) = mpsc::channel::<OutboundMsg>(256);
+    let mut dispatch = AsyncDispatch::new(outbound_tx);
+    dispatch.listen(args.port);
 
     #[cfg(target_os = "linux")]
     let pcap_linktype = pcap::LINKTYPE_ETHERNET;
@@ -68,46 +96,71 @@ fn run() {
         .map_err(|e| warn!("pcap disabled: {e}"))
         .ok();
 
+    let mut chaos = (args.chaos > 0.0 || args.chaos_reorder > 0.0 || args.chaos_jitter_ms > 0)
+        .then(|| {
+            info!(
+                drop_rate = args.chaos,
+                reorder = args.chaos_reorder,
+                jitter_ms = args.chaos_jitter_ms,
+                "chaos middleware active"
+            );
+            ChaosMiddleware::new(ChaosConfig {
+                drop_rate: args.chaos,
+                reorder_rate: args.chaos_reorder,
+                max_jitter_ms: args.chaos_jitter_ms,
+            })
+        });
+
     let mut buf = [0u8; STAGING_BUF];
 
     loop {
-        let n = match tun.recv(&mut buf) {
-            Ok(0) => continue,
-            Ok(n) => n,
-            Err(e) => {
-                error!("read error: {}", e);
-                break;
+        tokio::select! {
+            guard_result = async_tun.readable() => {
+                let mut guard = guard_result?;
+                match guard.try_io(|inner| inner.get_ref().try_recv_nb(&mut buf)) {
+                    Ok(Ok(0)) => {}
+                    Ok(Ok(n)) => {
+                        if let Some(ref mut pw) = pcap_writer {
+                            let _ = pw.write_packet(&buf[..n]);
+                        }
+                        inbound_dispatch(&buf[..n], &mut dispatch);
+                    }
+                    Ok(Err(e)) => {
+                        error!("TUN read error: {}", e);
+                        break;
+                    }
+                    Err(_would_block) => {}
+                }
             }
-        };
 
-        if let Some(ref mut pw) = pcap_writer {
-            let _ = pw.write_packet(&buf[..n]);
-        }
-
-        match dispatch(&buf[..n], &mut stack) {
-            Some(response) => {
+            Some(msg) = outbound_rx.recv() => {
+                let framed = frame_outbound(&msg);
                 if let Some(ref mut pw) = pcap_writer {
-                    let _ = pw.write_packet(&response);
+                    let _ = pw.write_packet(&framed);
                 }
-                if let Err(e) = tun.send(&response) {
-                    warn!("write error: {}", e);
+                let packets = match chaos {
+                    Some(ref mut c) => c.intercept(framed, Instant::now()),
+                    None => vec![framed],
+                };
+                for pkt in packets {
+                    if let Err(e) = async_tun.get_ref().write_frame_nb(&pkt) {
+                        warn!("TUN write error: {}", e);
+                    }
                 }
             }
-            None => {}
         }
     }
+
+    Ok(())
 }
 
-// Linux dispatch: TAP delivers full Ethernet frames.
-// Response is an Ethernet frame wrapping the IP reply.
 #[cfg(target_os = "linux")]
-fn dispatch(raw: &[u8], stack: &mut tcp::Stack) -> Option<Vec<u8>> {
+fn inbound_dispatch(raw: &[u8], dispatch: &mut tcp::AsyncDispatch) {
     use crate::error::MagnumError;
     use crate::ethernet::EthernetFrame;
-    use crate::ipv4::{Ipv4Packet, PROTO_ICMP, PROTO_TCP, build_packet, format_ip};
-    use crate::tcp::OutboundPacket;
+    use crate::ipv4::{Ipv4Packet, PROTO_ICMP, PROTO_TCP, format_ip};
     use crate::tcp::header::TcpSegment;
-    use tracing::warn;
+    use tracing::{info, warn};
 
     let frame = match EthernetFrame::parse(raw) {
         Ok(f) => f,
@@ -116,19 +169,19 @@ fn dispatch(raw: &[u8], stack: &mut tcp::Stack) -> Option<Vec<u8>> {
                 ethertype = format!("0x{:04X}", et),
                 "dropped non-IPv4 frame"
             );
-            return None;
+            return;
         }
         Err(e) => {
-            warn!(error = %e, "malformed ethernet frame dropped");
-            return None;
+            warn!(error = %e, "malformed ethernet frame");
+            return;
         }
     };
 
     let packet = match Ipv4Packet::parse(frame.payload) {
         Ok(p) => p,
         Err(e) => {
-            warn!(error = %e, "malformed IPv4 packet dropped");
-            return None;
+            warn!(error = %e, "malformed IPv4 packet");
+            return;
         }
     };
 
@@ -139,15 +192,14 @@ fn dispatch(raw: &[u8], stack: &mut tcp::Stack) -> Option<Vec<u8>> {
                 dst = format_ip(&packet.header.dst),
                 "ICMP received"
             );
-            None
         }
         PROTO_TCP => {
             let seg = match TcpSegment::parse(packet.payload, packet.header.src, packet.header.dst)
             {
                 Ok(s) => s,
                 Err(e) => {
-                    warn!(error = %e, "malformed TCP segment dropped");
-                    return None;
+                    warn!(error = %e, "malformed TCP segment");
+                    return;
                 }
             };
 
@@ -156,21 +208,16 @@ fn dispatch(raw: &[u8], stack: &mut tcp::Stack) -> Option<Vec<u8>> {
                 dst = format!("{}:{}", format_ip(&packet.header.dst), seg.header.dst_port),
                 flags = format!("{:08b}", seg.header.flags.to_byte()),
                 seq = seg.header.seq,
-                "TCP segment"
+                "TCP"
             );
 
-            let OutboundPacket {
-                src_ip,
-                dst_ip,
-                tcp_bytes,
-            } = stack.process(packet.header.src, packet.header.dst, &seg)?;
-
-            let ip_bytes = build_packet(src_ip, dst_ip, PROTO_TCP, &tcp_bytes);
-            Some(EthernetFrame::build(
-                frame.src_mac,
+            dispatch.dispatch(
+                packet.header.src,
+                packet.header.dst,
                 frame.dst_mac,
-                &ip_bytes,
-            ))
+                frame.src_mac,
+                &seg,
+            );
         }
         proto => {
             warn!(
@@ -179,26 +226,21 @@ fn dispatch(raw: &[u8], stack: &mut tcp::Stack) -> Option<Vec<u8>> {
                 protocol = proto,
                 "unknown protocol dropped"
             );
-            None
         }
     }
 }
 
-// macOS dispatch: utun delivers raw IP packets (no Ethernet header).
-// Tun::recv already strips the 4-byte AF prefix; Tun::send re-adds it.
-// Response is a plain IP packet.
 #[cfg(target_os = "macos")]
-fn dispatch(raw: &[u8], stack: &mut tcp::Stack) -> Option<Vec<u8>> {
-    use crate::ipv4::{Ipv4Packet, PROTO_ICMP, PROTO_TCP, build_packet, format_ip};
-    use crate::tcp::OutboundPacket;
+fn inbound_dispatch(raw: &[u8], dispatch: &mut tcp::AsyncDispatch) {
+    use crate::ipv4::{Ipv4Packet, PROTO_ICMP, PROTO_TCP, format_ip};
     use crate::tcp::header::TcpSegment;
-    use tracing::warn;
+    use tracing::{info, warn};
 
     let packet = match Ipv4Packet::parse(raw) {
         Ok(p) => p,
         Err(e) => {
-            warn!(error = %e, "malformed IPv4 packet dropped");
-            return None;
+            warn!(error = %e, "malformed IPv4 packet");
+            return;
         }
     };
 
@@ -209,15 +251,14 @@ fn dispatch(raw: &[u8], stack: &mut tcp::Stack) -> Option<Vec<u8>> {
                 dst = format_ip(&packet.header.dst),
                 "ICMP received"
             );
-            None
         }
         PROTO_TCP => {
             let seg = match TcpSegment::parse(packet.payload, packet.header.src, packet.header.dst)
             {
                 Ok(s) => s,
                 Err(e) => {
-                    warn!(error = %e, "malformed TCP segment dropped");
-                    return None;
+                    warn!(error = %e, "malformed TCP segment");
+                    return;
                 }
             };
 
@@ -226,16 +267,16 @@ fn dispatch(raw: &[u8], stack: &mut tcp::Stack) -> Option<Vec<u8>> {
                 dst = format!("{}:{}", format_ip(&packet.header.dst), seg.header.dst_port),
                 flags = format!("{:08b}", seg.header.flags.to_byte()),
                 seq = seg.header.seq,
-                "TCP segment"
+                "TCP"
             );
 
-            let OutboundPacket {
-                src_ip,
-                dst_ip,
-                tcp_bytes,
-            } = stack.process(packet.header.src, packet.header.dst, &seg)?;
-
-            Some(build_packet(src_ip, dst_ip, PROTO_TCP, &tcp_bytes))
+            dispatch.dispatch(
+                packet.header.src,
+                packet.header.dst,
+                [0u8; 6],
+                [0u8; 6],
+                &seg,
+            );
         }
         proto => {
             warn!(
@@ -244,7 +285,20 @@ fn dispatch(raw: &[u8], stack: &mut tcp::Stack) -> Option<Vec<u8>> {
                 protocol = proto,
                 "unknown protocol dropped"
             );
-            None
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn frame_outbound(msg: &tcp::task::OutboundMsg) -> Vec<u8> {
+    use crate::ethernet::EthernetFrame;
+    use crate::ipv4::{PROTO_TCP, build_packet};
+    let ip = build_packet(msg.src_ip, msg.dst_ip, PROTO_TCP, &msg.tcp_bytes);
+    EthernetFrame::build(msg.ether_dst, msg.ether_src, &ip)
+}
+
+#[cfg(target_os = "macos")]
+fn frame_outbound(msg: &tcp::task::OutboundMsg) -> Vec<u8> {
+    use crate::ipv4::{PROTO_TCP, build_packet};
+    build_packet(msg.src_ip, msg.dst_ip, PROTO_TCP, &msg.tcp_bytes)
 }

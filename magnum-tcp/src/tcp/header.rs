@@ -56,6 +56,29 @@ pub struct TcpSegment<'a> {
     pub payload: &'a [u8],
 }
 
+pub struct TcpSegmentOwned {
+    pub header: TcpHeader,
+    pub payload: Vec<u8>,
+}
+
+impl TcpSegmentOwned {
+    pub fn as_seg(&self) -> TcpSegment<'_> {
+        TcpSegment {
+            header: self.header.clone(),
+            payload: &self.payload,
+        }
+    }
+}
+
+impl<'a> From<&TcpSegment<'a>> for TcpSegmentOwned {
+    fn from(seg: &TcpSegment<'a>) -> Self {
+        Self {
+            header: seg.header.clone(),
+            payload: seg.payload.to_vec(),
+        }
+    }
+}
+
 impl<'a> TcpSegment<'a> {
     pub fn parse(raw: &'a [u8], src_ip: [u8; 4], dst_ip: [u8; 4]) -> Result<Self> {
         if raw.len() < TCP_MIN_HEADER_LEN {
@@ -306,5 +329,18 @@ mod tests {
     fn checksum_verify_over_syn() {
         let raw = build_syn(42);
         assert_eq!(tcp_checksum(&raw, CLIENT_IP, SERVER_IP), 0);
+    }
+
+    #[test]
+    fn owned_roundtrip_preserves_fields() {
+        let raw = build_syn(1234);
+        let seg = TcpSegment::parse(&raw, CLIENT_IP, SERVER_IP).unwrap();
+        let owned = TcpSegmentOwned::from(&seg);
+        let back = owned.as_seg();
+        assert_eq!(back.header.src_port, CLIENT_PORT);
+        assert_eq!(back.header.dst_port, SERVER_PORT);
+        assert_eq!(back.header.seq, 1234);
+        assert!(back.header.flags.syn);
+        assert!(back.payload.is_empty());
     }
 }

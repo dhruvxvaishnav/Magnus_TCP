@@ -1,6 +1,58 @@
 # ProjectProgress.md — Magnum-TCP
 
-## Current Phase: Phase 6 — Live Integration / Portfolio Demo
+## Current Phase: Phase 7 — Polish / Live Linux Validation
+
+---
+
+## Session 6 — 2026-05-28
+
+### Completed
+- [x] `Cargo.toml` — added `clap = { version = "4", features = ["derive"] }` (pre-approved crate)
+- [x] `src/tcp/header.rs` — added `TcpSegmentOwned { header: TcpHeader, payload: Vec<u8> }`, `as_seg()` → borrows back into `TcpSegment<'_>`, `From<&TcpSegment<'_>>` impl; enables owned segments to cross `tokio::spawn` task boundaries
+- [x] `src/tcp/task.rs` (NEW) — `run_connection_task()` async per-connection task using `tokio::select! { biased; }`:
+  - Inbound segment arm: `inbound_rx.recv()` → `conn.process_segment()` → sends `OutboundMsg` on shared channel
+  - Retransmit arm: `interval(100ms)` → `conn.take_retransmits()` → sends expired segments
+  - Zero-window probe arm: `interval(1s)` → `conn.zero_window_probe()` → sends 1-byte probe when window=0
+  - Post-select: `conn.tick_time_wait(now)` and `TcbState::Closed` check → task exits cleanly
+  - `InboundMsg { seg: TcpSegmentOwned }` / `OutboundMsg { src_ip, dst_ip, tcp_bytes, ether_src, ether_dst }`
+  - 3 `#[tokio::test]` tests: SYN→SYN-ACK, channel-close exit, timer smoke test
+- [x] `src/tcp/mod.rs` — added `pub mod task;`; added `AsyncDispatch` (runtime dispatch, replaces synchronous `Stack` in the event loop): spawns `run_connection_task` on first SYN, routes subsequent segments via `mpsc::try_send`, evicts stale entries on closed channel; synchronous `Stack` retained for all existing unit tests
+- [x] `src/tun.rs` — added to Linux + macOS `impl Tun`: `set_nonblocking()` (fcntl O_NONBLOCK), `try_recv_nb(&self)` (non-blocking read, `&File` form), `write_frame_nb(&self)` (non-blocking write); added `impl std::os::unix::io::AsRawFd for Tun` required by `AsyncFd<Tun>`; stub methods added to Windows Tun for cross-platform compilation
+- [x] `src/main.rs` — full rewrite:
+  - `#[derive(Parser)] struct Cli` with `--port u16`, `--chaos f64`, `--chaos-reorder f64`, `--chaos-jitter-ms u64`
+  - `#[tokio::main] async fn main()` — parses CLI, platform-gates to Linux/macOS
+  - `async fn run(args: Cli)` (cfg unix) — opens TUN, `tun.set_nonblocking()`, wraps in `tokio::io::unix::AsyncFd<Tun>`, creates `AsyncDispatch`, creates shared `mpsc::channel::<OutboundMsg>(256)`; `tokio::select!` loop: `async_tun.readable()` arm reads via `guard.try_io()`, `outbound_rx.recv()` arm frames + optionally chaos-intercepts + writes via `write_frame_nb()`
+  - `ChaosMiddleware` wired to `--chaos / --chaos-reorder / --chaos-jitter-ms` flags (active only when any flag > 0)
+  - Platform-specific `inbound_dispatch()` (Linux: Ethernet→IP→TCP; macOS: IP→TCP) and `frame_outbound()` (Linux: TCP→IP→Ethernet; macOS: TCP→IP)
+  - PCAP capture unchanged (both inbound and outbound recorded)
+- [x] `cargo fmt --all` — clean
+- [x] `cargo clippy -- -D warnings` — zero warnings
+- [x] All 89 tests pass (85 existing + 4 new)
+
+### Phase 6 Acceptance Criteria Status
+- [x] `--port <u16>` and `--chaos <f64>` CLI flags via clap
+- [x] Zero-window probe driven by `tokio::time::interval` in per-connection task (unit tested)
+- [x] Retransmit timer driven by `tokio::time::interval` in per-connection task (unit tested)
+- [x] TIME_WAIT → CLOSED driven by `tick_time_wait()` checked per-loop in connection task
+- [x] Per-connection `tokio::spawn`-ed tasks with `mpsc` channel dispatch (PRD §8.5)
+- [x] `AsyncFd<Tun>` for non-blocking async TUN I/O on Linux/macOS
+- [x] `ChaosMiddleware` wired to `--chaos` / `--chaos-reorder` / `--chaos-jitter-ms` CLI flags
+- [ ] Live Linux end-to-end: `nc <virtual_ip> 80`, Wireshark opens `capture.pcap` (requires Linux + TAP)
+- [ ] 10 MB transfer over `--chaos 0.10` with Fast Retransmit in logs (requires Linux)
+- [ ] Valgrind / ASAN: TIME_WAIT expires without fd or memory leak (requires Linux)
+
+### Test Results
+```
+running 89 tests ... test result: ok. 89 passed; 0 failed
+```
+`cargo fmt --all` clean | `cargo clippy -- -D warnings` zero warnings
+
+### What Is Next (Phase 7)
+- Live Linux end-to-end test: bring up TAP (`ip tuntap add dev tap0 mode tap`), run `magnum-tcp --port 80`, connect with `nc 192.168.100.2 80`, verify handshake + data + FIN in Wireshark from `capture.pcap`
+- 10 MB file transfer with `--chaos 0.10` — confirm Fast Retransmit appears in structured logs
+- Valgrind / ASAN: exercise all 11 states, verify no leaks after TIME_WAIT expiry
+- Connection eviction: sweep `AsyncDispatch::channels` map for closed tasks periodically (currently only evicts on next send)
+- `--port` multi-listen: extend `AsyncDispatch::listen()` to support comma-separated ports or repeated `--port`
 
 ---
 
