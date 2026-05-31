@@ -155,11 +155,10 @@ async fn run(args: Cli) -> crate::error::Result<()> {
                             let _ = pw.write_packet(&buf[..n]);
                         }
                         let arp_reply = inbound_dispatch(&buf[..n], &mut dispatch, our_ip, our_mac);
-                        if let Some(reply_frame) = arp_reply {
-                            if let Err(e) = async_tun.get_ref().write_frame_nb(&reply_frame) {
+                        if let Some(reply_frame) = arp_reply
+                            && let Err(e) = async_tun.get_ref().write_frame_nb(&reply_frame) {
                                 warn!("ARP reply write error: {}", e);
                             }
-                        }
                     }
                     Ok(Err(e)) => {
                         error!("TUN read error: {}", e);
@@ -369,6 +368,46 @@ fn frame_outbound(msg: &tcp::task::OutboundMsg) -> Vec<u8> {
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+fn build_http_response(request: &[u8]) -> Vec<u8> {
+    let req = std::str::from_utf8(request).unwrap_or("");
+    let first_line = req.lines().next().unwrap_or("");
+    let mut parts = first_line.split_whitespace();
+    let method = parts.next().unwrap_or("GET");
+    let path = parts.next().unwrap_or("/");
+
+    let body: String = match (method, path) {
+        ("GET", "/") => "Hello from Magnum-TCP!\r\n".into(),
+        ("GET", "/echo") => req.to_string(),
+        ("GET", "/time") => {
+            let secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            format!("Unix timestamp: {}\r\n", secs)
+        }
+        ("POST", "/") => {
+            let body_start = req.find("\r\n\r\n").map(|i| i + 4).unwrap_or(req.len());
+            format!("You posted: {}\r\n", &req[body_start..])
+        }
+        _ => format!("404 Not Found: {} {}\r\n", method, path),
+    };
+
+    let status = if path == "/" || matches!((method, path), ("GET", "/echo") | ("GET", "/time") | ("POST", "/")) {
+        "200 OK"
+    } else {
+        "404 Not Found"
+    };
+
+    format!(
+        "HTTP/1.1 {}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        status,
+        body.len(),
+        body
+    )
+    .into_bytes()
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 async fn handle_connection(mut handle: tcp::NewConnectionHandle) {
     use tracing::info;
 
@@ -391,23 +430,35 @@ async fn handle_connection(mut handle: tcp::NewConnectionHandle) {
         let headers_complete = request_buf.windows(4).any(|w| w == b"\r\n\r\n");
 
         if is_http && headers_complete {
-            let body = b"Hello from Magnum-TCP!\r\n";
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                body.len()
-            );
-            let mut resp_bytes = response.into_bytes();
-            resp_bytes.extend_from_slice(body);
-            info!(key = ?handle.key, "HTTP response sent");
-            let _ = handle.send_tx.send(resp_bytes).await;
+            let resp = build_http_response(&request_buf);
+            info!(key = ?handle.key, method = first_word(&request_buf), path = second_word(&request_buf), "HTTP response sent");
+            let _ = handle.send_tx.send(resp).await;
             responded = true;
-        } else if !is_http && request_buf.len() > 0 {
+        } else if !is_http && !request_buf.is_empty() {
             let echo = request_buf.clone();
-            info!(key = ?handle.key, bytes = echo.len(), "echo response sent");
+            info!(key = ?handle.key, bytes = echo.len(), "raw echo sent");
             let _ = handle.send_tx.send(echo).await;
             responded = true;
         }
     }
 
     let _ = handle.close_tx.send(()).await;
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn first_word(buf: &[u8]) -> &str {
+    std::str::from_utf8(buf)
+        .unwrap_or("")
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn second_word(buf: &[u8]) -> &str {
+    let mut it = std::str::from_utf8(buf)
+        .unwrap_or("")
+        .split_whitespace();
+    it.next();
+    it.next().unwrap_or("/")
 }

@@ -1,7 +1,5 @@
 #![allow(dead_code)]
 
-use crate::error::{MagnumError, Result};
-
 #[cfg(target_os = "linux")]
 mod linux {
     use crate::error::{MagnumError, Result};
@@ -137,7 +135,6 @@ mod linux {
 
     impl std::os::unix::io::AsRawFd for Tun {
         fn as_raw_fd(&self) -> std::os::unix::io::RawFd {
-            use std::os::unix::io::AsRawFd;
             self.file.as_raw_fd()
         }
     }
@@ -276,11 +273,10 @@ mod macos {
         }
 
         pub fn send(&mut self, buf: &[u8]) -> Result<usize> {
-            // AF_INET = 2 in big-endian
             let hdr = [0u8, 0, 0, 2];
             let iov = [IoSlice::new(&hdr), IoSlice::new(buf)];
-            self.file.write_vectored(&iov)?;
-            Ok(buf.len())
+            let written = self.file.write_vectored(&iov)?;
+            Ok(written.saturating_sub(4))
         }
 
         pub fn set_nonblocking(&self) -> Result<()> {
@@ -309,8 +305,8 @@ mod macos {
         pub fn write_frame_nb(&self, buf: &[u8]) -> std::io::Result<usize> {
             let hdr = [0u8, 0, 0, 2];
             let iov = [IoSlice::new(&hdr), IoSlice::new(buf)];
-            (&self.file).write_vectored(&iov)?;
-            Ok(buf.len())
+            let written = (&self.file).write_vectored(&iov)?;
+            Ok(written.saturating_sub(4))
         }
 
         pub fn mac_address(&self) -> Option<[u8; 6]> {
@@ -320,7 +316,6 @@ mod macos {
 
     impl std::os::unix::io::AsRawFd for Tun {
         fn as_raw_fd(&self) -> std::os::unix::io::RawFd {
-            use std::os::unix::io::AsRawFd;
             self.file.as_raw_fd()
         }
     }
